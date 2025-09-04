@@ -55,3 +55,15 @@ jobs:
           python laundrlab_balmain.py
           # adjust the CSV path/name inside laundrlab_balmain.py if different
           tail -n 50 data/laundrlab_balmain_status.csv || true
+          
+     # --- Bondi ---
+      - name: Run scraper (Bondi)
+        env:
+          TARGET_URL: "https://wa.sqinsights.com/182471?room=6190"
+          REFERER_URL: "https://laundrlab.com.au/live-status-bondi/"
+          SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
+          LOCATION: "Bondi"
+        run: |
+          python laundrlab_bondi.py
+          # adjust the CSV path/name inside laundrlab_bondi.py if different
+          tail -n 50 data/laundrlab_bondi_status.csv || true
