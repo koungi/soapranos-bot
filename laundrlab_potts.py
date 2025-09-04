@@ -14,6 +14,9 @@ SHEET_WEBAPP_URL = os.getenv(
     "https://script.google.com/macros/s/AKfycbxSQkRvbFuaiWtxhvgg81S5AzAbCaIlJWRN-XDHT87SC_gH2fGyex1GOZ7pS540hN0W/exec"
 )
 
+# New: configurable location label (defaults to 'Potts Point')
+LOCATION = os.getenv("LOCATION", "Potts Point")
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DEBUG_CSV = DATA_DIR / "laundrlab_potts_status.csv"
@@ -36,8 +39,9 @@ def _post_to_sheet(rows: List[List[str]]) -> None:
         print("Google Sheet response:", resp.read().decode("utf-8", "ignore"))
 
 def _write_debug_csv(rows: List[List[str]]) -> None:
+    # Updated header to include the new location column
     if not DEBUG_CSV.exists():
-        DEBUG_CSV.write_text("timestamp,machine,size,status\n", encoding="utf-8")
+        DEBUG_CSV.write_text("timestamp,machine,size,status,location\n", encoding="utf-8")
     with DEBUG_CSV.open("a", encoding="utf-8") as f:
         for r in rows:
             f.write(",".join(x.replace(",", " ") for x in r) + "\n")
@@ -99,11 +103,12 @@ def scrape() -> List[Dict]:
 
 def main():
     items = scrape()
-    ts = _now_sheets()   # <--- use the new helper
-    rows = [[ts, it["machine"], it["size"], it["status"]] for it in items]
+    ts = _now_sheets()
+    # New: append LOCATION after status
+    rows = [[ts, it["machine"], it["size"], it["status"], LOCATION] for it in items]
     _post_to_sheet(rows)
     _write_debug_csv(rows)
-    print(f"Wrote {len(rows)} row(s) to Google Sheets.")
+    print(f"Wrote {len(rows)} row(s) to Google Sheets. Included location column: '{LOCATION}'")
 
 if __name__ == "__main__":
     main()
