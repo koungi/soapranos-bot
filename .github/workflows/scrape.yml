@@ -22,16 +22,13 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run scraper
+      - name: Run scraper (posts to Google Sheets)
+        env:
+          # You can hardcode TARGET_URL here or leave it as default in the script
+          TARGET_URL: "https://wa.sqinsights.com/182471?room=2778"
+          # Optional: set via env; the script already includes your URL as a default
+          SHEET_WEBAPP_URL: "https://script.google.com/macros/s/AKfycbxSQkRvbFuaiWtxhvgg81S5AzAbCaIlJWRN-XDHT87SC_gH2fGyex1GOZ7pS540hN0W/exec"
         run: |
-          mkdir -p "$HOME/Documents/laundrlab-bot"
           python laundrlab_potts.py
-          ls -lah "$HOME/Documents/laundrlab-bot" || true
-
-      - name: Upload CSV artefact
-        uses: actions/upload-artifact@v4
-        with:
-          name: laundrlab_potts_status.csv
-          path: ${{ env.HOME }}/Documents/laundrlab-bot/laundrlab_potts_status.csv
-          if-no-files-found: warn
-          retention-days: 14
+          echo "Recent debug CSV (if any):"
+          tail -n 20 data/laundrlab_potts_status.csv || true
