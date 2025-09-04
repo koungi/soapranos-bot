@@ -19,7 +19,7 @@ LOCATION = os.getenv("LOCATION", "Balmain")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-DEBUG_CSV = DATA_DIR / "laundrlab_potts_status.csv"
+DEBUG_CSV = DATA_DIR / "laundrlab_balmain_status.csv"
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
