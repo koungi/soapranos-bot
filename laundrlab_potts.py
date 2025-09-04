@@ -1,71 +1,74 @@
 # laundrlab_potts.py
+# Scrape washer/dryer status from the sqinsights iframe and append rows to Google Sheets.
+# Falls back to scraping via the WordPress page if TARGET_URL is that page.
+
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from datetime import datetime, timezone
 from tenacity import retry, wait_fixed, stop_after_attempt
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import urllib.request
 import json
 import os
 import re
 
-# --- Config ---
-TARGET_URL = os.getenv("TARGET_URL", "https://laundrlab.com.au/live-status-potts-point/")
+# --- Config -------------------------------------------------------------
+
+# Best: point straight at the iframe URL (bypasses lazyload on WP page)
+DEFAULT_TARGET = "https://wa.sqinsights.com/182471?room=2778"
+
+TARGET_URL = os.getenv("TARGET_URL", DEFAULT_TARGET)
+
 SHEET_WEBAPP_URL = os.getenv(
     "SHEET_WEBAPP_URL",
     "https://script.google.com/macros/s/AKfycbxSQkRvbFuaiWtxhvgg81S5AzAbCaIlJWRN-XDHT87SC_gH2fGyex1GOZ7pS540hN0W/exec"
 )
 
-# Optional debug CSV (just for logs)
+# Optional debug CSV (written to ./data during the run so you can tail in logs)
 REPO_DIR = Path(__file__).resolve().parent
 DATA_DIR = REPO_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DEBUG_CSV = DATA_DIR / "laundrlab_potts_status.csv"
+
+# -----------------------------------------------------------------------
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _normalise_text(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
+def _normalise(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def _status_from_text(text: str) -> Tuple[str, str]:
+    t = (text or "").lower()
+    if any(k in t for k in ["out of order", "fault", "error", "down"]):
+        st = "Out of Order"
+    elif any(k in t for k in ["available", "vacant", "free"]):
+        st = "Available"
+    elif any(k in t for k in ["in use", "running", "busy", "occupied"]):
+        st = "In Use"
+    else:
+        st = "Unknown"
+    # try to capture time remaining like “12m”, “12 min”, “3 minutes”
+    m = re.search(r"(\d+\s*(?:m|min|mins|minutes))", t)
+    detail = m.group(1) if m else ""
+    return st, detail
 
 
 def _guess_type(name: str) -> str:
     n = name.lower()
-    if "dryer" in n or "dry" in n:
+    if "dryer" in n or re.search(r"\bdry\b", n):
         return "Dryer"
     if "washer" in n or "wash" in n or "laundry" in n:
         return "Washer"
     return ""
 
 
-def _parse_status_cell(text: str) -> (str, str):
-    t = text.lower()
-    status = "Unknown"
-    if any(k in t for k in ["available", "vacant", "free"]):
-        status = "Available"
-    elif any(k in t for k in ["in use", "running", "busy", "occupied"]):
-        status = "In Use"
-    elif any(k in t for k in ["out of order", "fault", "error", "down"]):
-        status = "Out of Order"
-    m = re.search(r"(\d+\s*(?:min|mins|minutes|m))", t)
-    detail = m.group(1) if m else ""
-    return status, detail
-
-
 def _rows_for_sheet(items: List[Dict]) -> List[List[str]]:
     ts = _now_iso()
-    rows = []
-    for it in items:
-        rows.append([
-            ts,
-            it.get("name", ""),
-            it.get("type", ""),
-            it.get("status", ""),
-            it.get("detail", "")
-        ])
-    return rows
+    return [[ts, i.get("name",""), i.get("type",""), i.get("status",""), i.get("detail","")] for i in items]
 
 
 def _post_to_sheet(rows: List[List[str]]) -> None:
@@ -93,121 +96,113 @@ def _write_debug_csv(rows: List[List[str]]) -> None:
         print("Debug CSV write failed:", e)
 
 
-def _extract_table_like(ctx) -> List[Dict]:
+def _extract_table(ctx) -> List[Dict]:
+    """Parse generic HTML table/grid into items."""
     items: List[Dict] = []
 
+    # Prefer explicit <table><tbody><tr>
     trs = ctx.locator("table tbody tr")
-    count = trs.count()
-    if count == 0:
+    if trs.count() == 0:
         trs = ctx.locator("tr")
-        count = trs.count()
 
-    if count > 0:
-        for i in range(count):
-            tds = trs.nth(i).locator("th, td")
-            c = tds.count()
-            if c == 0:
-                continue
-            cols = []
-            for j in range(c):
-                cols.append(_normalise_text(tds.nth(j).inner_text()))
-            name = cols[0] if cols else f"Machine {i+1}"
-            status_cell = cols[1] if len(cols) > 1 else (cols[0] if cols else "")
-            status, detail = _parse_status_cell(status_cell)
-            items.append({
-                "name": name,
-                "type": _guess_type(name),
-                "status": status,
-                "detail": detail
-            })
-        return items
-
-    # ARIA grid fallback
-    rows = ctx.locator('[role="row"]')
-    rcount = rows.count()
-    for i in range(rcount):
-        cells = rows.nth(i).locator('[role="gridcell"], [role="cell"]')
-        c = cells.count()
-        if c == 0:
+    row_count = min(200, trs.count())
+    for i in range(row_count):
+        tds = trs.nth(i).locator("th, td")
+        if tds.count() == 0:
             continue
-        cols = []
-        for j in range(c):
-            cols.append(_normalise_text(cells.nth(j).inner_text()))
-        name = cols[0] if cols else f"Machine {i+1}"
-        status_cell = cols[1] if len(cols) > 1 else (cols[0] if cols else "")
-        status, detail = _parse_status_cell(status_cell)
+        cells = [_normalise(tds.nth(j).inner_text()) for j in range(tds.count())]
+        # Skip header-like rows
+        if any(c.lower() in {"node","name","machine"} for c in cells) and not any(re.search(r"\d", c) for c in cells):
+            continue
+
+        # Heuristics: name is first non-empty that doesn't look like a status keyword
+        name = ""
+        status_text = ""
+        for c in cells:
+            if not name and not re.search(r"(available|in use|out of order|fault|error)", c, re.I):
+                name = c
+            if not status_text and re.search(r"(available|in use|out of order|fault|error|\d+\s*(?:m|min|mins|minutes))", c, re.I):
+                status_text = c
+
+        if not name:
+            name = cells[0] if cells else f"Machine {i+1}"
+
+        status, detail = _status_from_text(status_text or " ".join(cells))
         items.append({
             "name": name,
             "type": _guess_type(name),
             "status": status,
             "detail": detail
         })
+
     return items
 
 
-def _extract_cards_like(ctx) -> List[Dict]:
+def _extract_cards(ctx) -> List[Dict]:
+    """Fallback for card/tile layouts."""
     items: List[Dict] = []
     tiles = ctx.locator("div,li,section,article").filter(
-        has_text=re.compile(r"washer|dryer|wash|dry|available|in use|out of order", re.I)
+        has_text=re.compile(r"washer|dryer|available|in use|out of order|fault|error", re.I)
     )
-    tcount = min(100, tiles.count())
+    tcount = min(200, tiles.count())
     for i in range(tcount):
-        text = _normalise_text(tiles.nth(i).inner_text())
+        text = _normalise(tiles.nth(i).inner_text())
         if not text:
             continue
+        # Try to pick a name-ish bit
         name_match = re.search(r"(?:washer|dryer)\s*#?\s*\d+|(?:washer|dryer)[^\s,;:]+", text, re.I)
         name = name_match.group(0) if name_match else f"Machine {i+1}"
-        status, detail = _parse_status_cell(text)
-        items.append({
-            "name": name,
-            "type": _guess_type(name),
-            "status": status,
-            "detail": detail
-        })
+        status, detail = _status_from_text(text)
+        items.append({"name": name, "type": _guess_type(name), "status": status, "detail": detail})
     return items
 
 
-def _pick_content_context(page) -> Optional[object]:
+def _force_lazy_iframe(page) -> Optional[object]:
     """
-    Safely pick a context to scrape:
-    - Prefer an iframe that actually has a table/grid.
-    - Else, fall back to the main page.
+    On the WordPress page, if the iframe uses data-lazy-src, set it to src and wait for load.
+    Returns a Frame to scrape, or None.
     """
     try:
-        # Wait briefly for any iframes to attach
-        page.wait_for_selector("iframe", timeout=5_000)
+        page.wait_for_selector("iframe", timeout=5000)
     except PWTimeout:
-        pass
+        return None
 
-    iframes = page.locator("iframe")
-    n = iframes.count()
-    print(f"Found {n} iframe(s).")
+    # find any iframe that has data-lazy-src (WP Rocket lazyload)
+    frame_el = page.locator("iframe[data-lazy-src]").first
+    if frame_el.count() == 0:
+        # maybe already loaded normally
+        handle = page.locator("iframe").first.element_handle()
+        return handle.content_frame() if handle else None
 
-    # Try each iframe; use element_handle() -> content_frame()
-    for i in range(n):
-        try:
-            handle = iframes.nth(i).element_handle()
-            if not handle:
-                continue
-            frame = handle.content_frame()
-            if not frame:
-                continue
-            # Quick probe: does it look table-ish?
-            try:
-                frame.wait_for_selector("table, [role='grid']", timeout=3_000)
-                print(f"Using iframe #{i} as content context.")
-                return frame
-            except PWTimeout:
-                # Not obviously table-like; still could be valid—check text length heuristic
-                txt = frame.inner_text("body")[:1000]
-                if any(k in txt.lower() for k in ["washer", "dryer", "available", "in use", "out of order"]):
-                    print(f"Using iframe #{i} based on keyword heuristic.")
-                    return frame
-        except Exception as e:
-            print(f"Iframe #{i} inspect error: {e}")
+    # set src from data-lazy-src
+    lazy_url = page.evaluate("(el) => el.getAttribute('data-lazy-src')", frame_el.element_handle())
+    if not lazy_url:
+        return None
 
-    print("Falling back to main page context.")
-    return page
+    page.evaluate("(el, url) => { el.setAttribute('src', url); }", frame_el.element_handle(), lazy_url)
+    # wait for it to become non-empty
+    try:
+        page.wait_for_timeout(300)  # give the browser a tick
+        handle = frame_el.element_handle()
+        fr = handle.content_frame() if handle else None
+        if fr:
+            fr.wait_for_load_state("networkidle", timeout=15000)
+        return fr
+    except Exception:
+        return None
+
+
+def _context_for_url(page, url: str):
+    """
+    If url is the sqinsights URL, we scrape the page directly.
+    If it’s the WP page, we try to enter the lazy iframe.
+    """
+    if "wa.sqinsights.com" in url:
+        return page
+    # WordPress page with lazy iframe
+    fr = _force_lazy_iframe(page)
+    print("Lazy iframe forced:", bool(fr))
+    return fr or page
 
 
 @retry(wait=wait_fixed(5), stop=stop_after_attempt(3))
@@ -218,27 +213,22 @@ def scrape() -> List[Dict]:
         print("Navigating to:", TARGET_URL)
         page.goto(TARGET_URL, wait_until="networkidle", timeout=90_000)
 
-        ctx = _pick_content_context(page)
+        ctx = _context_for_url(page, TARGET_URL)
 
-        # Try to wait for table/grid, but don't fail if not found
+        # Try table-ish first
         try:
             ctx.wait_for_selector("table, [role='grid']", timeout=10_000)
-        except PWTimeout:
+        except Exception:
             pass
 
-        items = _extract_table_like(ctx)
+        items = _extract_table(ctx)
         if not items:
-            items = _extract_cards_like(ctx)
+            items = _extract_cards(ctx)
 
         browser.close()
 
     if not items:
-        items = [{
-            "name": "N/A",
-            "type": "",
-            "status": "NO_ROWS_FOUND",
-            "detail": ""
-        }]
+        items = [{"name": "N/A", "type": "", "status": "NO_ROWS_FOUND", "detail": ""}]
     return items
 
 
@@ -254,7 +244,7 @@ def main():
             "name": "N/A",
             "type": "",
             "status": "SCRAPE_ERROR",
-            "detail": _normalise_text(str(e))[:200]
+            "detail": _normalise(str(e))[:200]
         }])
         try:
             _post_to_sheet(fail_rows)
