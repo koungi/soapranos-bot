@@ -2,20 +2,20 @@ name: laundrlab-potts-scraper
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # runs every 1 minutes (UTC)
-  workflow_dispatch: {}       # allow manual run from the UI
+    - cron: "*/5 * * * *"   # GitHub minimum; UTC
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
 concurrency:
   group: scrape-laundrlab
-  cancel-in-progress: false
+  cancel-in-progress: false   # queue if a run is still going
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
 
     steps:
       - name: Check out
@@ -32,14 +32,17 @@ jobs:
           pip install playwright==1.45.0 tenacity==8.2.3
           python -m playwright install --with-deps chromium
 
-      - name: Run scraper (posts to Google Sheets)
+      - name: Run scraper every minute for ~5 minutes
         env:
           TARGET_URL: "https://wa.sqinsights.com/182471?room=2778"
           REFERER_URL: "https://laundrlab.com.au/live-status-potts-point/"
-          SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}  # set this secret
+          SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
         run: |
-          python laundrlab_potts.py
-          tail -n 50 data/laundrlab_potts_status.csv || true
+          for i in {1..5}; do
+            echo "Run $i/5 @ $(date -u) UTC"
+            python laundrlab_potts.py || echo "scrape failed (exit $?)"
+            if [ $i -lt 5 ]; then sleep 60; fi
+          done
 
       - name: Upload latest CSV (optional)
         if: always()
