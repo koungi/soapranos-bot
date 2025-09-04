@@ -3,7 +3,7 @@ name: laundrlab-potts-scraper
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 15 minutes (times are UTC)
+    - cron: "*/15 * * * *"   # every 15 minutes (times are UTC)
 
 permissions:
   contents: read
