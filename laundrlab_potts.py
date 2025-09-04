@@ -1,28 +1,22 @@
 # laundrlab_potts.py
-# Scrapes washer/dryer status and appends rows to a Google Sheet via Apps Script
-# Works on GitHub Actions (headless Chromium via Playwright)
-#
-# Sheet columns written (in order):
-# [timestamp_iso, machine_name, machine_type, status, detail]
-
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from datetime import datetime, timezone
 from tenacity import retry, wait_fixed, stop_after_attempt
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pathlib import Path
 import urllib.request
 import json
 import os
 import re
 
+# --- Config ---
 TARGET_URL = os.getenv("TARGET_URL", "https://laundrlab.com.au/live-status-potts-point/")
 SHEET_WEBAPP_URL = os.getenv(
     "SHEET_WEBAPP_URL",
-    # You can keep this env-based, but since you asked for the fixed URL:
     "https://script.google.com/macros/s/AKfycbxSQkRvbFuaiWtxhvgg81S5AzAbCaIlJWRN-XDHT87SC_gH2fGyex1GOZ7pS540hN0W/exec"
 )
 
-# Optional local CSV for debugging (kept in repo /data)
+# Optional debug CSV (just for logs)
 REPO_DIR = Path(__file__).resolve().parent
 DATA_DIR = REPO_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -47,19 +41,14 @@ def _guess_type(name: str) -> str:
 
 
 def _parse_status_cell(text: str) -> (str, str):
-    """
-    Returns (status, detail). Tries to extract things like "In Use (12m left)".
-    """
     t = text.lower()
     status = "Unknown"
-    if "available" in t or "vacant" in t or "free" in t:
+    if any(k in t for k in ["available", "vacant", "free"]):
         status = "Available"
-    elif "in use" in t or "running" in t or "busy" in t or "occupied" in t:
+    elif any(k in t for k in ["in use", "running", "busy", "occupied"]):
         status = "In Use"
-    elif "out of order" in t or "fault" in t or "error" in t or "down" in t:
+    elif any(k in t for k in ["out of order", "fault", "error", "down"]):
         status = "Out of Order"
-
-    # detail = anything that looks like time left
     m = re.search(r"(\d+\s*(?:min|mins|minutes|m))", t)
     detail = m.group(1) if m else ""
     return status, detail
@@ -94,7 +83,6 @@ def _post_to_sheet(rows: List[List[str]]) -> None:
 
 
 def _write_debug_csv(rows: List[List[str]]) -> None:
-    """Optional: keep a simple CSV copy for debugging (not required for Sheets)."""
     try:
         if not DEBUG_CSV.exists():
             DEBUG_CSV.write_text("timestamp,machine_name,machine_type,status,detail\n", encoding="utf-8")
@@ -105,20 +93,13 @@ def _write_debug_csv(rows: List[List[str]]) -> None:
         print("Debug CSV write failed:", e)
 
 
-def _extract_table_like(frame) -> List[Dict]:
-    """
-    Generic extractor for common 'table' layouts.
-    Looks for <table><tbody><tr><td>… patterns first.
-    Falls back to role=grid/row patterns if needed.
-    """
+def _extract_table_like(ctx) -> List[Dict]:
     items: List[Dict] = []
 
-    # Try standard table rows
-    trs = frame.locator("table tbody tr")
+    trs = ctx.locator("table tbody tr")
     count = trs.count()
     if count == 0:
-        # Try any tr
-        trs = frame.locator("tr")
+        trs = ctx.locator("tr")
         count = trs.count()
 
     if count > 0:
@@ -130,9 +111,6 @@ def _extract_table_like(frame) -> List[Dict]:
             cols = []
             for j in range(c):
                 cols.append(_normalise_text(tds.nth(j).inner_text()))
-            # Heuristic mapping:
-            #  - col0: machine name
-            #  - col1 or col2: status
             name = cols[0] if cols else f"Machine {i+1}"
             status_cell = cols[1] if len(cols) > 1 else (cols[0] if cols else "")
             status, detail = _parse_status_cell(status_cell)
@@ -145,7 +123,7 @@ def _extract_table_like(frame) -> List[Dict]:
         return items
 
     # ARIA grid fallback
-    rows = frame.locator('[role="row"]')
+    rows = ctx.locator('[role="row"]')
     rcount = rows.count()
     for i in range(rcount):
         cells = rows.nth(i).locator('[role="gridcell"], [role="cell"]')
@@ -167,19 +145,16 @@ def _extract_table_like(frame) -> List[Dict]:
     return items
 
 
-def _extract_cards_like(frame) -> List[Dict]:
-    """
-    Fallback for 'card' UIs (div-based tiles):
-    Grab visible tiles and try to split name/status.
-    """
+def _extract_cards_like(ctx) -> List[Dict]:
     items: List[Dict] = []
-    tiles = frame.locator("div,li,section,article").filter(has_text=re.compile(r"washer|dryer|wash|dry|available|in use|out of order", re.I))
+    tiles = ctx.locator("div,li,section,article").filter(
+        has_text=re.compile(r"washer|dryer|wash|dry|available|in use|out of order", re.I)
+    )
     tcount = min(100, tiles.count())
     for i in range(tcount):
         text = _normalise_text(tiles.nth(i).inner_text())
         if not text:
             continue
-        # naive split: first token with '#' or namey bit
         name_match = re.search(r"(?:washer|dryer)\s*#?\s*\d+|(?:washer|dryer)[^\s,;:]+", text, re.I)
         name = name_match.group(0) if name_match else f"Machine {i+1}"
         status, detail = _parse_status_cell(text)
@@ -192,6 +167,49 @@ def _extract_cards_like(frame) -> List[Dict]:
     return items
 
 
+def _pick_content_context(page) -> Optional[object]:
+    """
+    Safely pick a context to scrape:
+    - Prefer an iframe that actually has a table/grid.
+    - Else, fall back to the main page.
+    """
+    try:
+        # Wait briefly for any iframes to attach
+        page.wait_for_selector("iframe", timeout=5_000)
+    except PWTimeout:
+        pass
+
+    iframes = page.locator("iframe")
+    n = iframes.count()
+    print(f"Found {n} iframe(s).")
+
+    # Try each iframe; use element_handle() -> content_frame()
+    for i in range(n):
+        try:
+            handle = iframes.nth(i).element_handle()
+            if not handle:
+                continue
+            frame = handle.content_frame()
+            if not frame:
+                continue
+            # Quick probe: does it look table-ish?
+            try:
+                frame.wait_for_selector("table, [role='grid']", timeout=3_000)
+                print(f"Using iframe #{i} as content context.")
+                return frame
+            except PWTimeout:
+                # Not obviously table-like; still could be valid—check text length heuristic
+                txt = frame.inner_text("body")[:1000]
+                if any(k in txt.lower() for k in ["washer", "dryer", "available", "in use", "out of order"]):
+                    print(f"Using iframe #{i} based on keyword heuristic.")
+                    return frame
+        except Exception as e:
+            print(f"Iframe #{i} inspect error: {e}")
+
+    print("Falling back to main page context.")
+    return page
+
+
 @retry(wait=wait_fixed(5), stop=stop_after_attempt(3))
 def scrape() -> List[Dict]:
     with sync_playwright() as p:
@@ -200,21 +218,11 @@ def scrape() -> List[Dict]:
         print("Navigating to:", TARGET_URL)
         page.goto(TARGET_URL, wait_until="networkidle", timeout=90_000)
 
-        # Try to get the actual content (some sites nest inside an iframe)
-        frame = None
-        try:
-            # If there’s a single significant iframe, use that
-            iframes = page.locator("iframe")
-            if iframes.count() > 0:
-                frame = iframes.nth(0).content_frame()
-        except PWTimeout:
-            frame = None
+        ctx = _pick_content_context(page)
 
-        ctx = frame if frame is not None else page
-
-        # Wait for something table-ish to appear (don’t fail the run if it doesn’t)
+        # Try to wait for table/grid, but don't fail if not found
         try:
-            ctx.wait_for_selector("table, [role='grid']", timeout=15_000)
+            ctx.wait_for_selector("table, [role='grid']", timeout=10_000)
         except PWTimeout:
             pass
 
@@ -224,7 +232,6 @@ def scrape() -> List[Dict]:
 
         browser.close()
 
-    # If we truly found nothing, emit a heartbeat row so you can see the run happened
     if not items:
         items = [{
             "name": "N/A",
@@ -232,7 +239,6 @@ def scrape() -> List[Dict]:
             "status": "NO_ROWS_FOUND",
             "detail": ""
         }]
-
     return items
 
 
@@ -241,11 +247,9 @@ def main():
         items = scrape()
         rows = _rows_for_sheet(items)
         _post_to_sheet(rows)
-        # Optional: keep a simple CSV copy in the repo for quick inspection
-        _write_debug_csv(rows)
-        print(f"Wrote {len(rows)} rows to Google Sheets.")
+        _write_debug_csv(rows)  # optional
+        print(f"Wrote {len(rows)} row(s) to Google Sheets.")
     except Exception as e:
-        # Also write a heartbeat row on failure
         fail_rows = _rows_for_sheet([{
             "name": "N/A",
             "type": "",
