@@ -25,7 +25,7 @@ jobs:
       - name: Run scraper (posts to Google Sheets)
         env:
           # You can hardcode TARGET_URL here or leave it as default in the script
-          TARGET_URL: "https://laundrlab.com.au/live-status-potts-point/"
+          TARGET_URL: "https://wa.sqinsights.com/182471?room=2778"
           # Optional: set via env; the script already includes your URL as a default
           SHEET_WEBAPP_URL: "https://script.google.com/macros/s/AKfycbxSQkRvbFuaiWtxhvgg81S5AzAbCaIlJWRN-XDHT87SC_gH2fGyex1GOZ7pS540hN0W/exec"
         run: |
