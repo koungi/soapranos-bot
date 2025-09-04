@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from tenacity import retry, wait_fixed, stop_after_attempt
 from pathlib import Path
 from typing import List, Dict
+from zoneinfo import ZoneInfo
 import urllib.request, json, os, re
 
 TARGET_URL = os.getenv("TARGET_URL", "https://wa.sqinsights.com/182471?room=2778")
@@ -20,7 +21,8 @@ DEBUG_CSV = DATA_DIR / "laundrlab_potts_status.csv"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-def _now_iso(): return datetime.now(timezone.utc).isoformat()
+def _now_sheets():
+    return datetime.now(ZoneInfo("Australia/Sydney")).strftime("%Y-%m-%d %H:%M:%S")
 def _clean(s: str) -> str: return re.sub(r"\s+", " ", (s or "").strip())
 
 def _post_to_sheet(rows: List[List[str]]) -> None:
