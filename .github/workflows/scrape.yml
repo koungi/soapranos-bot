@@ -31,11 +31,25 @@ jobs:
           pip install "playwright==1.45.0" "tenacity==8.2.3"
           python -m playwright install --with-deps chromium
 
-      - name: Run scraper
+     # --- Potts Point ---
+      - name: Run scraper (Potts Point)
         env:
           TARGET_URL: "https://wa.sqinsights.com/182471?room=2778"
           REFERER_URL: "https://laundrlab.com.au/live-status-potts-point/"
           SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
+          LOCATION: "Potts Point"
         run: |
           python laundrlab_potts.py
           tail -n 50 data/laundrlab_potts_status.csv || true
+
+      # --- Balmain ---
+      - name: Run scraper (Balmain)
+        env:
+          TARGET_URL: "https://wa.sqinsights.com/182471?room=11976"
+          REFERER_URL: "https://laundrlab.com.au/live-status-balmain/"
+          SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
+          LOCATION: "Balmain"
+        run: |
+          python laundrlab_balmain.py
+          # adjust the CSV path/name inside laundrlab_balmain.py if different
+          tail -n 50 data/laundrlab_balmain_status.csv || true
