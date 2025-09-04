@@ -15,7 +15,7 @@ import json
 import os
 import re
 
-TARGET_URL = os.getenv("TARGET_URL", "https://wa.sqinsights.com/182471?room=2778")
+TARGET_URL = os.getenv("TARGET_URL", "https://laundrlab.com.au/live-status-potts-point/")
 SHEET_WEBAPP_URL = os.getenv(
     "SHEET_WEBAPP_URL",
     # You can keep this env-based, but since you asked for the fixed URL:
