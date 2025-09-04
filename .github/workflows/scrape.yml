@@ -1,5 +1,5 @@
 # .github/workflows/laundrlab-potts-scraper.yml
-name: laundrlab-potts-scraper
+name: laundrlab-scraper-all
 
 on:
   schedule:
