@@ -2,52 +2,42 @@ name: laundrlab-potts-scraper
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # GitHub minimum; UTC
-  workflow_dispatch: {}
+    - cron: "*/1 * * * *"   # every 10 minutes (UTC)
+  workflow_dispatch: {}       # manual runs still allowed
 
 permissions:
   contents: read
 
 concurrency:
   group: scrape-laundrlab
-  cancel-in-progress: false   # queue if a run is still going
+  cancel-in-progress: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
 
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (Playwright + Chromium)
+      - name: Print UTC time (debug the schedule)
+        run: date -u
+
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install playwright==1.45.0 tenacity==8.2.3
           python -m playwright install --with-deps chromium
 
-      - name: Run scraper every minute for ~5 minutes
+      - name: Run scraper
         env:
           TARGET_URL: "https://wa.sqinsights.com/182471?room=2778"
           REFERER_URL: "https://laundrlab.com.au/live-status-potts-point/"
           SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
         run: |
-          for i in {1..5}; do
-            echo "Run $i/5 @ $(date -u) UTC"
-            python laundrlab_potts.py || echo "scrape failed (exit $?)"
-            if [ $i -lt 5 ]; then sleep 60; fi
-          done
-
-      - name: Upload latest CSV (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: latest-csv
-          path: data/laundrlab_potts_status.csv
-          if-no-files-found: ignore
+          python laundrlab_potts.py
+          tail -n 50 data/laundrlab_potts_status.csv || true
