@@ -1,149 +1,263 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# laundrlab_potts.py
+# Scrapes washer/dryer status and appends rows to a Google Sheet via Apps Script
+# Works on GitHub Actions (headless Chromium via Playwright)
+#
+# Sheet columns written (in order):
+# [timestamp_iso, machine_name, machine_type, status, detail]
 
-"""
-Scrape Laundrlab Potts Point live machine status into CSV.
-- Handles the embedded iframe (wa.sqinsights.com).
-- Appends one row per machine per run with a timestamp.
-"""
-
-import asyncio
-import csv
-import re
-from datetime import datetime
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from datetime import datetime, timezone
+from tenacity import retry, wait_fixed, stop_after_attempt
+from typing import List, Dict
 from pathlib import Path
-from typing import List, Dict, Optional
+import urllib.request
+import json
+import os
+import re
 
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+TARGET_URL = os.getenv("TARGET_URL", "https://wa.sqinsights.com/182471?room=2778")
+SHEET_WEBAPP_URL = os.getenv(
+    "SHEET_WEBAPP_URL",
+    # You can keep this env-based, but since you asked for the fixed URL:
+    "https://script.google.com/macros/s/AKfycbxSQkRvbFuaiWtxhvgg81S5AzAbCaIlJWRN-XDHT87SC_gH2fGyex1GOZ7pS540hN0W/exec"
+)
 
-URL = "https://laundrlab.com.au/live-status-potts-point/"
-
-# Write the CSV in your Documents folder so it’s easy to find in Finder/Excel
-OUT_CSV = Path.home() / "Documents" / "laundrlab-bot" / "laundrlab_potts_status.csv"
-
-# Snapshots for troubleshooting (optional to view in a browser)
-PARENT_HTML_SNAPSHOT = Path.home() / "Documents" / "laundrlab-bot" / "laundrlab_parent_last.html"
-IFRAME_HTML_SNAPSHOT = Path.home() / "Documents" / "laundrlab-bot" / "laundrlab_iframe_last.html"
-
-TIMEOUT_MS = 60_000
-
-# Flip this to True ONCE if you want to watch the browser load the page
-DEBUG_HEADLESS = False  # True = hidden (default), False = visible for a test run
-
-
-def ensure_csv_header() -> None:
-    if not OUT_CSV.exists():
-        OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-        with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["timestamp_local", "machine", "size", "status", "extra"])
+# Optional local CSV for debugging (kept in repo /data)
+REPO_DIR = Path(__file__).resolve().parent
+DATA_DIR = REPO_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+DEBUG_CSV = DATA_DIR / "laundrlab_potts_status.csv"
 
 
-def clean_text(s: Optional[str]) -> str:
-    s = re.sub(r"\s+", " ", (s or "")).strip()
-    s = s.replace("Create Alert", "").replace("•", "").strip()
-    return s
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-async def grab_rows() -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=DEBUG_HEADLESS)
-        page = await browser.new_page()
-        await page.goto(URL, timeout=TIMEOUT_MS, wait_until="networkidle")
-        PARENT_HTML_SNAPSHOT.write_text(await page.content(), encoding="utf-8")
+def _normalise_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
 
-        # Find the wa.sqinsights.com iframe
-        target_frame = None
-        # Wait for *any* iframe first (desktop and mobile layouts differ)
-        await page.wait_for_selector("iframe", timeout=TIMEOUT_MS)
-        for fr in page.frames:
-            if "wa.sqinsights.com" in (fr.url or ""):
-                target_frame = fr
-                break
 
-        if target_frame is None:
-            await browser.close()
-            return rows  # No iframe visible yet
+def _guess_type(name: str) -> str:
+    n = name.lower()
+    if "dryer" in n or "dry" in n:
+        return "Dryer"
+    if "washer" in n or "wash" in n or "laundry" in n:
+        return "Washer"
+    return ""
 
-        # Wait for the table body rows inside the iframe
-        await target_frame.wait_for_selector("table tbody tr", timeout=TIMEOUT_MS)
 
-        # Optional snapshot if same-origin allows it
-        try:
-            IFRAME_HTML_SNAPSHOT.write_text(await target_frame.content(), encoding="utf-8")
-        except Exception:
-            pass  # Cross-origin .content() may be blocked — locators still work
+def _parse_status_cell(text: str) -> (str, str):
+    """
+    Returns (status, detail). Tries to extract things like "In Use (12m left)".
+    """
+    t = text.lower()
+    status = "Unknown"
+    if "available" in t or "vacant" in t or "free" in t:
+        status = "Available"
+    elif "in use" in t or "running" in t or "busy" in t or "occupied" in t:
+        status = "In Use"
+    elif "out of order" in t or "fault" in t or "error" in t or "down" in t:
+        status = "Out of Order"
 
-        # Pick the table that has a "Machine" header
-        tables = target_frame.locator("table")
-        tcount = await tables.count()
-        table_locator = None
-        for i in range(tcount):
-            tloc = tables.nth(i)
-            head_txt = clean_text(await tloc.inner_text())
-            if re.search(r"\bMachine\b", head_txt, flags=re.I):
-                table_locator = tloc
-                break
-        if table_locator is None and tcount > 0:
-            table_locator = tables.nth(0)
+    # detail = anything that looks like time left
+    m = re.search(r"(\d+\s*(?:min|mins|minutes|m))", t)
+    detail = m.group(1) if m else ""
+    return status, detail
 
-        if table_locator is None:
-            await browser.close()
-            return rows
 
-        body_rows = table_locator.locator("tbody tr")
-        n = await body_rows.count()
-
-        for i in range(n):
-            tds = body_rows.nth(i).locator("td")
-            td_count = await tds.count()
-            if td_count == 0:
-                continue
-
-            machine = clean_text(await tds.nth(0).inner_text()) if td_count >= 1 else ""
-            size    = clean_text(await tds.nth(1).inner_text()) if td_count >= 2 else ""
-            status  = clean_text(await tds.nth(2).inner_text()) if td_count >= 3 else ""
-            extra   = clean_text(await tds.nth(3).inner_text()) if td_count >= 4 else ""
-
-            # Normalise “10 min left” into the extra column
-            m = re.search(r"(\d+)\s*min\.?\s*left", status, flags=re.I)
-            if m:
-                extra = f"{m.group(1)} min left"
-                status = clean_text(re.sub(r"\d+\s*min\.?\s*left", "", status, flags=re.I))
-
-            rows.append({"machine": machine, "size": size, "status": status or "Unknown", "extra": extra})
-
-        await browser.close()
+def _rows_for_sheet(items: List[Dict]) -> List[List[str]]:
+    ts = _now_iso()
+    rows = []
+    for it in items:
+        rows.append([
+            ts,
+            it.get("name", ""),
+            it.get("type", ""),
+            it.get("status", ""),
+            it.get("detail", "")
+        ])
     return rows
 
 
-def append_csv(items: List[Dict[str, str]]) -> None:
-    ensure_csv_header()
-    ts = datetime.now().astimezone().isoformat(timespec="seconds")
-    with OUT_CSV.open("a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if not items:
-            w.writerow([ts, "", "", "NO_ROWS_FOUND", ""])
-            return
-        for r in items:
-            w.writerow([ts, r["machine"], r["size"], r["status"], r["extra"]])
+def _post_to_sheet(rows: List[List[str]]) -> None:
+    if not SHEET_WEBAPP_URL:
+        print("SHEET_WEBAPP_URL not set; skipping Google Sheets upload.")
+        return
+    payload = json.dumps(rows).encode("utf-8")
+    req = urllib.request.Request(
+        SHEET_WEBAPP_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        print("Google Sheet response:", resp.read().decode("utf-8", "ignore"))
 
 
-async def run_once():
+def _write_debug_csv(rows: List[List[str]]) -> None:
+    """Optional: keep a simple CSV copy for debugging (not required for Sheets)."""
     try:
-        items = await grab_rows()
-        append_csv(items)
-        # Print how many we captured (helps you see success in Terminal)
-        print(f"Wrote {len(items)} machine rows to {OUT_CSV}")
-    except PWTimeout as e:
-        append_csv([])  # heartbeat row
-        print(f"Timeout: {e}")
+        if not DEBUG_CSV.exists():
+            DEBUG_CSV.write_text("timestamp,machine_name,machine_type,status,detail\n", encoding="utf-8")
+        with DEBUG_CSV.open("a", encoding="utf-8") as f:
+            for r in rows:
+                f.write(",".join(x.replace(",", " ") for x in r) + "\n")
     except Exception as e:
-        ts = datetime.now().astimezone().isoformat(timespec="seconds")
-        with OUT_CSV.open("a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([ts, "", "", f"ERROR: {type(e).__name__}", str(e)])
-        print(f"Error: {type(e).__name__}: {e}")
+        print("Debug CSV write failed:", e)
+
+
+def _extract_table_like(frame) -> List[Dict]:
+    """
+    Generic extractor for common 'table' layouts.
+    Looks for <table><tbody><tr><td>… patterns first.
+    Falls back to role=grid/row patterns if needed.
+    """
+    items: List[Dict] = []
+
+    # Try standard table rows
+    trs = frame.locator("table tbody tr")
+    count = trs.count()
+    if count == 0:
+        # Try any tr
+        trs = frame.locator("tr")
+        count = trs.count()
+
+    if count > 0:
+        for i in range(count):
+            tds = trs.nth(i).locator("th, td")
+            c = tds.count()
+            if c == 0:
+                continue
+            cols = []
+            for j in range(c):
+                cols.append(_normalise_text(tds.nth(j).inner_text()))
+            # Heuristic mapping:
+            #  - col0: machine name
+            #  - col1 or col2: status
+            name = cols[0] if cols else f"Machine {i+1}"
+            status_cell = cols[1] if len(cols) > 1 else (cols[0] if cols else "")
+            status, detail = _parse_status_cell(status_cell)
+            items.append({
+                "name": name,
+                "type": _guess_type(name),
+                "status": status,
+                "detail": detail
+            })
+        return items
+
+    # ARIA grid fallback
+    rows = frame.locator('[role="row"]')
+    rcount = rows.count()
+    for i in range(rcount):
+        cells = rows.nth(i).locator('[role="gridcell"], [role="cell"]')
+        c = cells.count()
+        if c == 0:
+            continue
+        cols = []
+        for j in range(c):
+            cols.append(_normalise_text(cells.nth(j).inner_text()))
+        name = cols[0] if cols else f"Machine {i+1}"
+        status_cell = cols[1] if len(cols) > 1 else (cols[0] if cols else "")
+        status, detail = _parse_status_cell(status_cell)
+        items.append({
+            "name": name,
+            "type": _guess_type(name),
+            "status": status,
+            "detail": detail
+        })
+    return items
+
+
+def _extract_cards_like(frame) -> List[Dict]:
+    """
+    Fallback for 'card' UIs (div-based tiles):
+    Grab visible tiles and try to split name/status.
+    """
+    items: List[Dict] = []
+    tiles = frame.locator("div,li,section,article").filter(has_text=re.compile(r"washer|dryer|wash|dry|available|in use|out of order", re.I))
+    tcount = min(100, tiles.count())
+    for i in range(tcount):
+        text = _normalise_text(tiles.nth(i).inner_text())
+        if not text:
+            continue
+        # naive split: first token with '#' or namey bit
+        name_match = re.search(r"(?:washer|dryer)\s*#?\s*\d+|(?:washer|dryer)[^\s,;:]+", text, re.I)
+        name = name_match.group(0) if name_match else f"Machine {i+1}"
+        status, detail = _parse_status_cell(text)
+        items.append({
+            "name": name,
+            "type": _guess_type(name),
+            "status": status,
+            "detail": detail
+        })
+    return items
+
+
+@retry(wait=wait_fixed(5), stop=stop_after_attempt(3))
+def scrape() -> List[Dict]:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page()
+        print("Navigating to:", TARGET_URL)
+        page.goto(TARGET_URL, wait_until="networkidle", timeout=90_000)
+
+        # Try to get the actual content (some sites nest inside an iframe)
+        frame = None
+        try:
+            # If there’s a single significant iframe, use that
+            iframes = page.locator("iframe")
+            if iframes.count() > 0:
+                frame = iframes.nth(0).content_frame()
+        except PWTimeout:
+            frame = None
+
+        ctx = frame if frame is not None else page
+
+        # Wait for something table-ish to appear (don’t fail the run if it doesn’t)
+        try:
+            ctx.wait_for_selector("table, [role='grid']", timeout=15_000)
+        except PWTimeout:
+            pass
+
+        items = _extract_table_like(ctx)
+        if not items:
+            items = _extract_cards_like(ctx)
+
+        browser.close()
+
+    # If we truly found nothing, emit a heartbeat row so you can see the run happened
+    if not items:
+        items = [{
+            "name": "N/A",
+            "type": "",
+            "status": "NO_ROWS_FOUND",
+            "detail": ""
+        }]
+
+    return items
+
+
+def main():
+    try:
+        items = scrape()
+        rows = _rows_for_sheet(items)
+        _post_to_sheet(rows)
+        # Optional: keep a simple CSV copy in the repo for quick inspection
+        _write_debug_csv(rows)
+        print(f"Wrote {len(rows)} rows to Google Sheets.")
+    except Exception as e:
+        # Also write a heartbeat row on failure
+        fail_rows = _rows_for_sheet([{
+            "name": "N/A",
+            "type": "",
+            "status": "SCRAPE_ERROR",
+            "detail": _normalise_text(str(e))[:200]
+        }])
+        try:
+            _post_to_sheet(fail_rows)
+            _write_debug_csv(fail_rows)
+        finally:
+            raise
 
 
 if __name__ == "__main__":
-    asyncio.run(run_once())
+    main()
