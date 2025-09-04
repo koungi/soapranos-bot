@@ -1,0 +1,37 @@
+name: laundrlab-potts-scraper
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (UTC)
+  workflow_dispatch: {}       # manual run button
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (Playwright + Chromium)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run scraper
+        run: |
+          mkdir -p "$HOME/Documents/laundrlab-bot"
+          python laundrlab_potts.py
+          ls -lah "$HOME/Documents/laundrlab-bot" || true
+
+      - name: Upload CSV artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: laundrlab_potts_status.csv
+          path: ${{ env.HOME }}/Documents/laundrlab-bot/laundrlab_potts_status.csv
+          if-no-files-found: warn
+          retention-days: 14
