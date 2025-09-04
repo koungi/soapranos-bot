@@ -3,7 +3,6 @@ name: laundrlab-potts-scraper
 on:
   schedule:
     - cron: "*/1 * * * *"   # every 10 minutes (UTC)
-  workflow_dispatch: {}       # manual runs still allowed
 
 permissions:
   contents: read
