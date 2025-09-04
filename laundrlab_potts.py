@@ -23,6 +23,7 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 
 def _now_sheets():
     return datetime.now(ZoneInfo("Australia/Sydney")).strftime("%Y-%m-%d %H:%M:%S")
+    
 def _clean(s: str) -> str: return re.sub(r"\s+", " ", (s or "").strip())
 
 def _post_to_sheet(rows: List[List[str]]) -> None:
@@ -98,7 +99,7 @@ def scrape() -> List[Dict]:
 
 def main():
     items = scrape()
-    ts = _now_iso()
+    ts = _now_sheets()   # <--- use the new helper
     rows = [[ts, it["machine"], it["size"], it["status"]] for it in items]
     _post_to_sheet(rows)
     _write_debug_csv(rows)
