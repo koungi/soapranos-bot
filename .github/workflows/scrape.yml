@@ -2,7 +2,6 @@
 name: laundrlab-scraper-all
 
 on:
-  schedule:
   workflow_dispatch:
 
 
