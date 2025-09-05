@@ -15,8 +15,6 @@ concurrency:
 
 jobs:
   scrape:
-    # optional: skip running in forks
-    if: github.repository_owner == 'koungi'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
