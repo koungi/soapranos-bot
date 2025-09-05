@@ -4,7 +4,6 @@ name: laundrlab-scraper-all
 on:
   schedule:
     - cron: "*/15 * * * *"   # every 15 minutes (times are UTC)
-  workflow_dispatch:
 
 
 permissions:
