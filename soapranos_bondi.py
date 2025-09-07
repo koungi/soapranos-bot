@@ -1,4 +1,4 @@
-# laundrlab_balmain.py
+# soapranos_balmain.py
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from datetime import datetime, timezone
 from tenacity import retry, wait_fixed, stop_after_attempt
@@ -19,7 +19,7 @@ LOCATION = os.getenv("LOCATION", "Bondi")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-DEBUG_CSV = DATA_DIR / "laundrlab_bondi_status.csv"
+DEBUG_CSV = DATA_DIR / "soapranos_bondi_status.csv"
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
