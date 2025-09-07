@@ -15,18 +15,23 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30   # give apt/browsers a little breathing room
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install deps
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install "playwright==1.45.0" "tenacity==8.2.3"
+
+      # This installs Chromium **and** the required system packages on the runner.
+      - name: Install Playwright browsers + OS deps
+        run: |
           python -m playwright install --with-deps chromium
 
      # --- Potts Point ---
