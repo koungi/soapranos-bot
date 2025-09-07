@@ -1,5 +1,5 @@
-# .github/workflows/laundrlab-potts-scraper.yml
-name: laundrlab-scraper-all
+# .github/workflows/soapranos-potts-scraper.yml
+name: soapranos-scraper-all
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: scrape-laundrlab
+  group: scrape-soapranos
   cancel-in-progress: false
 
 jobs:
@@ -37,8 +37,8 @@ jobs:
           SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
           LOCATION: "Potts Point"
         run: |
-          python laundrlab_potts.py
-          tail -n 50 data/laundrlab_potts_status.csv || true
+          python soapranos_potts.py
+          tail -n 50 data/soapranos_potts_status.csv || true
 
       # --- Balmain ---
       - name: Run scraper (Balmain)
@@ -48,9 +48,9 @@ jobs:
           SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
           LOCATION: "Balmain"
         run: |
-          python laundrlab_balmain.py
-          # adjust the CSV path/name inside laundrlab_balmain.py if different
-          tail -n 50 data/laundrlab_balmain_status.csv || true
+          python soapranos_balmain.py
+          # adjust the CSV path/name inside soapranos_balmain.py if different
+          tail -n 50 data/soapranos_balmain_status.csv || true
           
      # --- Bondi ---
       - name: Run scraper (Bondi)
@@ -60,6 +60,6 @@ jobs:
           SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
           LOCATION: "Bondi"
         run: |
-          python laundrlab_bondi.py
-          # adjust the CSV path/name inside laundrlab_bondi.py if different
-          tail -n 50 data/laundrlab_bondi_status.csv || true
+          python soapranos_bondi.py
+          # adjust the CSV path/name inside soapranos_bondi.py if different
+          tail -n 50 data/soapranos_bondi_status.csv || true
